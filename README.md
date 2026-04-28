@@ -115,3 +115,9 @@ python publish.py
 ---
 
 **⚠️ 免责声明**：本脚本纯属技术交流与自动化接口研究。因平台规则随时可能更新，请时刻留意 UI 变动。不要用作恶意批量发布垃圾内容。
+
+
+
+% source /Users/aiastia/Desktop/fanqie_auto_publis 虚拟环境进入 
+
+目前的cop 是自己发布 没有copy 的是发布到草稿。 另外 split是分割文件   python3 split_novel.py "列.txt"              
