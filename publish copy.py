@@ -467,40 +467,216 @@ def main():
                 else:
                     print("  [警告] 没找到正文的极其庞大的输入区域！")
                 
-                # 4. 点击【存草稿】保存为草稿
-                print(" -> 点击【存草稿】按钮保存当前章节...")
+                # 4. 点击【下一步】进行正式发布
+                print(" -> 点击右上角的【下一步】准备正式拔剑发布...")
                 
-                draft_saved = False
+                # 记录点击前的页面数量，用于检测新标签页
+                pages_before_next = len(context.pages)
                 
-                # 策略1：通过专属 CSS class 定位（最精确）
+                # 【精确修复】番茄编辑器的"下一步"按钮有专属 CSS class: auto-editor-next
+                next_btn_found = False
+                
+                # 策略1（最精确）：通过专属 class 定位
                 try:
-                    save_btn = editor_page.locator('button.auto-editor-save-btn').first
-                    if save_btn.is_visible():
-                        save_btn.click(force=True)
-                        draft_saved = True
-                        print("    - 已通过 CSS 选择器 button.auto-editor-save-btn 点击【存草稿】！")
+                    next_btn = editor_page.locator('button.auto-editor-next').first
+                    if next_btn.is_visible():
+                        next_btn.click(force=True)
+                        next_btn_found = True
+                        print("    - 已通过 CSS 选择器 button.auto-editor-next 精准点击【下一步】！")
                 except Exception:
                     pass
                 
-                # 策略2：通过文本匹配降级
-                if not draft_saved:
+                # 策略2：通过 class 包含 publish-button 定位
+                if not next_btn_found:
                     try:
-                        save_btn = editor_page.get_by_text("存草稿", exact=False).first
-                        if save_btn.is_visible():
-                            save_btn.click(force=True)
-                            draft_saved = True
-                            print("    - 已通过文本匹配点击【存草稿】！")
+                        next_btn = editor_page.locator('button.publish-button').first
+                        if next_btn.is_visible():
+                            next_btn.click(force=True)
+                            next_btn_found = True
+                            print("    - 已通过 CSS 选择器 button.publish-button 点击【下一步】")
                     except Exception:
                         pass
                 
-                if draft_saved:
-                    print(f"  [\U0001f4dd 草稿已保存] 第 {success_count+1} 章：'第{chapter_num}章 {chapter_title}'")
-                    success_count += 1
+                # 策略3：空间坐标 + 文本匹配降级
+                if not next_btn_found:
+                    next_btn_handles = editor_page.get_by_text("下一步", exact=True).element_handles()
+                    for btn_h in reversed(next_btn_handles):
+                        try:
+                            box = btn_h.bounding_box()
+                            if box and box['y'] < 300:
+                                btn_h.click()
+                                next_btn_found = True
+                                print(f"    - 已通过坐标降级策略点击【下一步】 (y={int(box['y'])})")
+                                break
+                        except Exception:
+                            continue
+                
+                # 策略4：终极降级
+                if not next_btn_found:
+                    try:
+                        next_btn = editor_page.get_by_text("下一步", exact=True).last
+                        if next_btn.is_visible():
+                            next_btn.click(force=True)
+                            next_btn_found = True
+                            print("    - 已通过终极降级策略点击【下一步】")
+                    except Exception:
+                        pass
+                
+                if next_btn_found:
+                    # ========== 流程：下一步 → 处理弹窗 → 确认发布 ==========
+                    # 弹窗关闭后会直接进入发布设置面板，不需要重新点击"下一步"
+                    
+                    editor_page.wait_for_timeout(2000)
+                    
+                    # 检测新标签页
+                    if len(context.pages) > pages_before_next:
+                        editor_page = context.pages[-1]
+                        print("    - 检测到新标签页，已自动切换！")
+                        editor_page.wait_for_timeout(2000)
+                    
+                    # 弹窗拦截1：错别字未修改 → 点击"提交"
+                    try:
+                        typo_text = editor_page.get_by_text(re.compile(r"错别字"), exact=False).first
+                        typo_text.wait_for(state="visible", timeout=3000)
+                        print("    - 检测到【错别字未修改】提示弹窗，点击【提交】...")
+                        submit_btn = None
+                        for btn_name in ["忽略全部", "继续提交", "提交"]:
+                            try:
+                                submit_btn = editor_page.get_by_role("button", name=btn_name).first
+                                if submit_btn.is_visible():
+                                    print(f"    - 找到按钮【{btn_name}】，点击！")
+                                    break
+                            except Exception:
+                                continue
+                        if submit_btn:
+                            submit_btn.click(force=True)
+                        else:
+                            editor_page.get_by_text("提交", exact=False).first.click(force=True)
+                        editor_page.wait_for_timeout(3000)
+                    except Exception:
+                        print("    - 无错别字弹窗，继续...")
+                    
+                    # 弹窗拦截2：是否开启风险提示功能 → 点击"取消"（不消耗次数）
+                    # 番茄使用 Arco Design 模态框，直接检测 arco-modal
+                    try:
+                        # 等一会让弹窗加载
+                        editor_page.wait_for_timeout(2000)
+                        
+                        risk_found = False
+                        # 方式1：检测 arco-modal 里包含"风险"文字
+                        try:
+                            risk_modal = editor_page.locator('div.arco-modal-content').filter(has_text=re.compile(r"风险")).first
+                            if risk_modal.is_visible():
+                                risk_found = True
+                                print("    - 检测到 Arco 模态框【风险提示】弹窗！")
+                        except Exception:
+                            pass
+                        
+                        # 方式2：检测页面任意位置包含"风险提示功能"或"消耗此功能"的文字
+                        if not risk_found:
+                            try:
+                                risk_text = editor_page.get_by_text(re.compile(r"风险提示功能|消耗此功能使用次数|标注当前章节可能存在的风险"), exact=False).first
+                                if risk_text.is_visible():
+                                    risk_found = True
+                                    print("    - 检测到【风险提示功能】弹窗！")
+                            except Exception:
+                                pass
+                        
+                        # 方式3：检测 arco-modal 是否存在（通用兜底）
+                        if not risk_found:
+                            try:
+                                any_modal = editor_page.locator('div.arco-modal:visible').first
+                                if any_modal.is_visible():
+                                    # 检查模态框内是否有取消按钮（排除确认发布面板）
+                                    modal_cancel = any_modal.locator('button:has-text("取消")').first
+                                    if modal_cancel.is_visible():
+                                        risk_found = True
+                                        print("    - 检测到通用模态框弹窗（含取消按钮）！")
+                            except Exception:
+                                pass
+                        
+                        if risk_found:
+                            print("    - 点击【取消】跳过风险提示...")
+                            cancel_btn = None
+                            for btn_name in ["取消", "暂不开启", "跳过"]:
+                                try:
+                                    cancel_btn = editor_page.get_by_role("button", name=btn_name).first
+                                    if cancel_btn.is_visible():
+                                        print(f"    - 找到按钮【{btn_name}】，点击！")
+                                        break
+                                except Exception:
+                                    continue
+                            if not cancel_btn:
+                                try:
+                                    cancel_btn = editor_page.locator('div.arco-modal button:has-text("取消")').first
+                                except Exception:
+                                    cancel_btn = None
+                            if cancel_btn:
+                                cancel_btn.click(force=True)
+                            else:
+                                editor_page.keyboard.press("Escape")
+                            editor_page.wait_for_timeout(1500)
+                        else:
+                            print("    - 无风险提示弹窗，继续...")
+                    except Exception:
+                        print("    - 无风险提示弹窗，继续...")
+                    
+                    # 检测新标签页（弹窗处理后可能弹出）
+                    if len(context.pages) > pages_before_next:
+                        editor_page = context.pages[-1]
+                        print("    - 检测到新标签页，已自动切换！")
+                        editor_page.wait_for_timeout(1000)
+                    
+                    # 等待发布设置面板出现，找到【确认发布】按钮
+                    print("    - 正在等待【确认发布】按钮出现（最多等15秒）...")
+                    publish_btn = None
+                    
+                    try:
+                        publish_btn = editor_page.get_by_role("button", name="确认发布").first
+                        publish_btn.wait_for(state="visible", timeout=15000)
+                        print("    - 已找到【确认发布】按钮！")
+                    except Exception:
+                        try:
+                            publish_btn = editor_page.get_by_text("确认发布", exact=True).first
+                            publish_btn.wait_for(state="visible", timeout=5000)
+                            print("    - 通过文本匹配找到【确认发布】按钮！")
+                        except Exception:
+                            try:
+                                publish_btn = editor_page.get_by_text(re.compile(r"确认发布|发布")).first
+                                publish_btn.wait_for(state="visible", timeout=5000)
+                                print("    - 通过模糊匹配找到发布按钮！")
+                            except Exception:
+                                publish_btn = None
+                    
+                    if publish_btn:
+                        try:
+                            # 强制勾选【是否使用AI：否】
+                            print("    - 强制勾选【是否使用AI：否】...")
+                            ai_yes_label = editor_page.get_by_text("否", exact=True).first
+                            ai_yes_label.wait_for(state="visible", timeout=3000)
+                            ai_yes_label.click(force=True)
+                            editor_page.wait_for_timeout(500)
+                        except Exception:
+                            pass
+                        
+                        publish_btn.click(force=True)
+                        print(f"  [🎇 发布成功] 第 {success_count+1} 章：'第{chapter_num}章 {chapter_title}' 已被发往全世界！")
+                        success_count += 1
+                    else:
+                        print(f"  [警告] 未找到'确认发布'按钮！")
+                        print(f"  [调试] 当前页面URL: {editor_page.url}")
+                        input("  请您手动点击【确认发布】，然后回到这黑框按回车继续 >>> ")
+                        success_count += 1
                 else:
-                    print(f"  [警告] 未找到'存草稿'按钮！")
-                    input("  请您手动点击【存草稿】，然后按回车继续 >>> ")
-                    success_count += 1
-
+                    print("  未能找到'下一步'按钮！尝试降级为【一键光速存草稿】...")
+                    save_btn = editor_page.get_by_text("存草稿", exact=False).first
+                    if save_btn.is_visible():
+                        save_btn.click()
+                        print(f"  [降级保存] 第 {success_count+1} 章：已转为稳重存草稿！")
+                        success_count += 1
+                    else:
+                        print("  未能找到任何保存入口，当前章节宣告失败！")
+                        success_count += 1
                 
                 page.wait_for_timeout(3000) # 等待对号保存成功消失的动画
                 
