@@ -556,70 +556,136 @@ def main():
                     except Exception:
                         print("    - 无错别字弹窗，继续...")
                     
-                    # 弹窗拦截2：是否开启风险提示功能 → 点击"取消"（不消耗次数）
-                    # 番茄使用 Arco Design 模态框，直接检测 arco-modal
+                    # 弹窗拦截2：内容检测方式选择 / 风险提示功能
+                    # 番茄平台新版UI：弹出「请选择内容检测方式」弹窗，需点击「仅基础检测」
+                    # 旧版UI：弹出「风险提示功能」弹窗，需点击「取消」
                     try:
                         # 等一会让弹窗加载
                         editor_page.wait_for_timeout(2000)
                         
-                        risk_found = False
-                        # 方式1：检测 arco-modal 里包含"风险"文字
+                        popup_handled = False
+                        
+                        # ========== 新版弹窗：内容检测方式 ==========
+                        # 检测是否出现「请选择内容检测方式」弹窗
                         try:
-                            risk_modal = editor_page.locator('div.arco-modal-content').filter(has_text=re.compile(r"风险")).first
-                            if risk_modal.is_visible():
-                                risk_found = True
-                                print("    - 检测到 Arco 模态框【风险提示】弹窗！")
+                            new_check_text = editor_page.get_by_text(re.compile(r"内容检测方式|全面检测|仅基础检测"), exact=False).first
+                            if new_check_text.is_visible():
+                                print("    - 检测到新版【内容检测方式】选择弹窗！")
+                                
+                                # 点击「仅基础检测」按钮
+                                basic_check_btn = None
+                                # 方式1：通过按钮文本精确匹配
+                                for btn_text in ["仅基础检测", "基础检测"]:
+                                    try:
+                                        basic_check_btn = editor_page.get_by_role("button", name=btn_text).first
+                                        if basic_check_btn.is_visible():
+                                            print(f"    - 找到按钮【{btn_text}】，点击！")
+                                            break
+                                    except Exception:
+                                        continue
+                                
+                                # 方式2：通过 Arco Design class 定位
+                                if not basic_check_btn:
+                                    try:
+                                        arco_secondary_btns = editor_page.locator('button.arco-btn-secondary').element_handles()
+                                        for btn_h in arco_secondary_btns:
+                                            try:
+                                                box = btn_h.bounding_box()
+                                                if box and box['y'] > 100:  # 排除顶部导航栏的按钮
+                                                    inner_text = btn_h.evaluate("el => el.innerText")
+                                                    if "基础检测" in inner_text or "基础" in inner_text:
+                                                        basic_check_btn = editor_page.locator('button.arco-btn-secondary').nth(
+                                                            arco_secondary_btns.index(btn_h)
+                                                        ).first
+                                                        print(f"    - 通过 Arco class 找到按钮（文本：{inner_text}），点击！")
+                                                        break
+                                            except Exception:
+                                                continue
+                                    except Exception:
+                                        pass
+                                
+                                # 方式3：通过文本模糊匹配
+                                if not basic_check_btn:
+                                    try:
+                                        basic_check_btn = editor_page.get_by_text(re.compile(r"基础检测"), exact=False).first
+                                        if not basic_check_btn.is_visible():
+                                            basic_check_btn = None
+                                    except Exception:
+                                        basic_check_btn = None
+                                
+                                if basic_check_btn:
+                                    basic_check_btn.click(force=True)
+                                    print("    - 已选择【基础检测】（不限次数）！")
+                                    popup_handled = True
+                                else:
+                                    print("    [警告] 未找到「基础检测」按钮，尝试 Escape 关闭...")
+                                    editor_page.keyboard.press("Escape")
+                                    popup_handled = True
+                                
+                                editor_page.wait_for_timeout(1500)
                         except Exception:
                             pass
                         
-                        # 方式2：检测页面任意位置包含"风险提示功能"或"消耗此功能"的文字
-                        if not risk_found:
+                        # ========== 旧版弹窗：风险提示功能（兼容兜底） ==========
+                        if not popup_handled:
+                            risk_found = False
+                            # 方式1：检测 arco-modal 里包含"风险"文字
                             try:
-                                risk_text = editor_page.get_by_text(re.compile(r"风险提示功能|消耗此功能使用次数|标注当前章节可能存在的风险"), exact=False).first
-                                if risk_text.is_visible():
+                                risk_modal = editor_page.locator('div.arco-modal-content').filter(has_text=re.compile(r"风险")).first
+                                if risk_modal.is_visible():
                                     risk_found = True
-                                    print("    - 检测到【风险提示功能】弹窗！")
+                                    print("    - 检测到 Arco 模态框【风险提示】弹窗！")
                             except Exception:
                                 pass
-                        
-                        # 方式3：检测 arco-modal 是否存在（通用兜底）
-                        if not risk_found:
-                            try:
-                                any_modal = editor_page.locator('div.arco-modal:visible').first
-                                if any_modal.is_visible():
-                                    # 检查模态框内是否有取消按钮（排除确认发布面板）
-                                    modal_cancel = any_modal.locator('button:has-text("取消")').first
-                                    if modal_cancel.is_visible():
+                            
+                            # 方式2：检测页面任意位置包含"风险提示功能"或"消耗此功能"的文字
+                            if not risk_found:
+                                try:
+                                    risk_text = editor_page.get_by_text(re.compile(r"风险提示功能|消耗此功能使用次数|标注当前章节可能存在的风险"), exact=False).first
+                                    if risk_text.is_visible():
                                         risk_found = True
-                                        print("    - 检测到通用模态框弹窗（含取消按钮）！")
-                            except Exception:
-                                pass
-                        
-                        if risk_found:
-                            print("    - 点击【取消】跳过风险提示...")
-                            cancel_btn = None
-                            for btn_name in ["取消", "暂不开启", "跳过"]:
-                                try:
-                                    cancel_btn = editor_page.get_by_role("button", name=btn_name).first
-                                    if cancel_btn.is_visible():
-                                        print(f"    - 找到按钮【{btn_name}】，点击！")
-                                        break
+                                        print("    - 检测到【风险提示功能】弹窗！")
                                 except Exception:
-                                    continue
-                            if not cancel_btn:
+                                    pass
+                            
+                            # 方式3：检测 arco-modal 是否存在（通用兜底）
+                            if not risk_found:
                                 try:
-                                    cancel_btn = editor_page.locator('div.arco-modal button:has-text("取消")').first
+                                    any_modal = editor_page.locator('div.arco-modal:visible').first
+                                    if any_modal.is_visible():
+                                        # 检查模态框内是否有取消按钮（排除确认发布面板）
+                                        modal_cancel = any_modal.locator('button:has-text("取消")').first
+                                        if modal_cancel.is_visible():
+                                            risk_found = True
+                                            print("    - 检测到通用模态框弹窗（含取消按钮）！")
                                 except Exception:
-                                    cancel_btn = None
-                            if cancel_btn:
-                                cancel_btn.click(force=True)
+                                    pass
+                            
+                            if risk_found:
+                                print("    - 点击【取消】跳过风险提示...")
+                                cancel_btn = None
+                                for btn_name in ["取消", "暂不开启", "跳过"]:
+                                    try:
+                                        cancel_btn = editor_page.get_by_role("button", name=btn_name).first
+                                        if cancel_btn.is_visible():
+                                            print(f"    - 找到按钮【{btn_name}】，点击！")
+                                            break
+                                    except Exception:
+                                        continue
+                                if not cancel_btn:
+                                    try:
+                                        cancel_btn = editor_page.locator('div.arco-modal button:has-text("取消")').first
+                                    except Exception:
+                                        cancel_btn = None
+                                if cancel_btn:
+                                    cancel_btn.click(force=True)
+                                else:
+                                    editor_page.keyboard.press("Escape")
+                                editor_page.wait_for_timeout(1500)
                             else:
-                                editor_page.keyboard.press("Escape")
-                            editor_page.wait_for_timeout(1500)
-                        else:
-                            print("    - 无风险提示弹窗，继续...")
+                                print("    - 无内容检测/风险提示弹窗，继续...")
                     except Exception:
-                        print("    - 无风险提示弹窗，继续...")
+                        print("    - 无内容检测/风险提示弹窗，继续...")
                     
                     # 检测新标签页（弹窗处理后可能弹出）
                     if len(context.pages) > pages_before_next:
