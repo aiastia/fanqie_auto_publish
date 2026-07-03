@@ -3,6 +3,7 @@ import glob
 import time
 import shutil
 import re
+from datetime import datetime, timedelta
 from playwright.sync_api import sync_playwright
 
 STATE_FILE = "state.json"
@@ -11,6 +12,191 @@ UPLOADED_DIR = "uploaded"
 
 # 番茄作家书籍管理首页
 BOOK_MANAGE_URL = "https://fanqienovel.com/main/writer/book-manage"
+
+def arco_select_date(page, target_date_str):
+    """点开 Arco 日期选择器，在弹出的日历面板里导航并选中目标日期。target_date_str: 'YYYY-MM-DD'"""
+    target = datetime.strptime(target_date_str, "%Y-%m-%d")
+    target_year, target_month, target_day = target.year, target.month, target.day
+
+    # 1. 定位日期输入框（placeholder 含"日期"）并点击展开日历
+    date_input = None
+    for inp in page.locator('input.arco-picker-start-time').element_handles():
+        try:
+            ph = inp.evaluate("el => el.getAttribute('placeholder') || ''")
+            if "日期" in ph:
+                date_input = inp
+                break
+        except Exception:
+            continue
+    if date_input is None:
+        date_input = page.locator('input.arco-picker-start-time').first.element_handle()
+    date_input.click()
+    page.wait_for_timeout(900)
+
+    # 2. 等待日历弹窗出现
+    try:
+        page.wait_for_selector('.arco-picker-header-value', timeout=5000)
+    except Exception:
+        pass
+    page.wait_for_timeout(500)
+
+    # 3. 导航到目标年月（Arco 表头形如 "2026年 7月" 或 "2026-07"）
+    for _ in range(48):
+        try:
+            header_text = page.locator('.arco-picker-header-value').first.inner_text(timeout=2000)
+        except Exception:
+            break
+        nums = re.findall(r'\d+', header_text)
+        if len(nums) < 2:
+            break
+        cur_year, cur_month = int(nums[0]), int(nums[1])
+        if cur_year == target_year and cur_month == target_month:
+            break
+        # 表头图标顺序：[上年, 上月, 下月, 下年] —— 索引 1=上月，2=下月
+        forward = (cur_year * 12 + cur_month) < (target_year * 12 + target_month)
+        arrow = page.locator('.arco-picker-header-icon').nth(2 if forward else 1)
+        try:
+            arrow.click(timeout=2000)
+        except Exception:
+            try:
+                if forward:
+                    page.locator('.arco-icon-right').first.click(timeout=2000)
+                else:
+                    page.locator('.arco-icon-left').first.click(timeout=2000)
+            except Exception:
+                break
+        page.wait_for_timeout(350)
+
+    # 4. 点击目标日期单元格
+    # 本版 Arco 用 .arco-picker-cell-in-view 标记"本月"单元格；
+    # 相邻月占位日没有 prev/next 类，必须用 in-view 过滤，否则会误点下月同号。
+    clicked = False
+    try:
+        cells = page.locator('.arco-picker-cell-in-view:not(.arco-picker-cell-disabled)').element_handles()
+        for cell in cells:
+            try:
+                # 数字容器：.arco-picker-date-value（新版） / .arco-picker-cell-inner（旧版）
+                val = cell.query_selector('.arco-picker-date-value, .arco-picker-cell-inner')
+                txt = (val.inner_text() if val else cell.inner_text()).strip()
+                if txt == str(target_day):
+                    cell.click()
+                    clicked = True
+                    break
+            except Exception:
+                continue
+    except Exception:
+        pass
+    # 兜底：用文本匹配点第一个含目标日数字的本月单元格
+    if not clicked:
+        for sel in ['.arco-picker-cell-in-view .arco-picker-date-value', '.arco-picker-date-value', '.arco-picker-cell-inner']:
+            try:
+                page.locator(sel).filter(has_text=str(target_day)).first.click(timeout=2000)
+                clicked = True
+                break
+            except Exception:
+                continue
+        if not clicked:
+            print(f"    [警告] 日历未点中目标日期 {target_day}")
+    page.wait_for_timeout(600)
+
+
+def arco_select_time(page, target_time_str):
+    """点开 Arco 时间选择器，在弹出的时分列里选中目标时间。target_time_str: 'HH:MM'"""
+    parts = (target_time_str.split(":") + ["00"])[:2]
+    hh_num = int(parts[0])   # 8
+    mm_num = int(parts[1])   # 0
+
+    # 1. 定位时间输入框并点击
+    time_input = None
+    for inp in page.locator('input.arco-picker-start-time').element_handles():
+        try:
+            ph = inp.evaluate("el => el.getAttribute('placeholder') || ''")
+            if "时间" in ph:
+                time_input = inp
+                break
+        except Exception:
+            continue
+    if time_input is None:
+        time_input = page.locator('input.arco-picker-start-time').last.element_handle()
+    time_input.click()
+    page.wait_for_timeout(900)
+
+    # 2. 等待时间列出现（新版: .arco-timepicker-list / .arco-timepicker-cell；旧版: .arco-timepicker-column）
+    try:
+        page.wait_for_selector('.arco-timepicker-list, .arco-timepicker-column', timeout=5000)
+    except Exception:
+        pass
+    page.wait_for_timeout(500)
+
+    def _pick(col_idx, target_num):
+        """在指定列里点击文本==目标数字的选项。兼容新版/旧版 DOM。"""
+        # 新版: .arco-timepicker-list > ul > li.arco-timepicker-cell
+        try:
+            lists = page.locator('.arco-timepicker-list').element_handles()
+            if len(lists) > col_idx:
+                ul = lists[col_idx].query_selector('ul')
+                if ul:
+                    for li in ul.query_selector_all('li.arco-timepicker-cell'):
+                        try:
+                            inner = li.query_selector('.arco-timepicker-cell-inner')
+                            txt = (inner.inner_text() if inner else li.inner_text()).strip()
+                            if int(txt) == target_num:
+                                li.scroll_into_view_if_needed()
+                                li.click()
+                                return True
+                        except Exception:
+                            continue
+        except Exception:
+            pass
+        # 旧版: .arco-timepicker-column > li.arco-timepicker-option
+        try:
+            cols = page.locator('.arco-timepicker-column').element_handles()
+            if len(cols) > col_idx:
+                col = cols[col_idx]
+                for opt in col.query_selector_all('li.arco-timepicker-option'):
+                    try:
+                        txt = opt.inner_text().strip()
+                        if int(txt) == target_num:
+                            opt.scroll_into_view_if_needed()
+                            opt.click()
+                            return True
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+        return False
+
+    # 3. 选小时、分钟
+    if not _pick(0, hh_num):
+        print(f"    [警告] 未点中小时 {hh_num}")
+    page.wait_for_timeout(350)
+    if not _pick(1, mm_num):
+        print(f"    [警告] 未点中分钟 {mm_num}")
+    page.wait_for_timeout(400)
+
+    # 4. 确认（新版底部"确定"主按钮，旧版同理）
+    confirmed = False
+    for sel in [
+        'div.arco-timepicker-footer-btn-wrapper button.arco-btn-primary',
+        '.arco-picker-footer button.arco-btn-primary',
+        'button:has-text("确定")',
+        'button:has-text("确认")',
+    ]:
+        try:
+            btn = page.locator(sel).first
+            if btn.is_visible():
+                btn.click()
+                confirmed = True
+                break
+        except Exception:
+            continue
+    if not confirmed:
+        try:
+            page.keyboard.press("Enter")
+        except Exception:
+            pass
+    page.wait_for_timeout(400)
+
 
 def main():
     if not os.path.exists(STATE_FILE):
@@ -98,6 +284,25 @@ def main():
     print(f"\n本次发布计划：【{book_name_filter}】× {len(txt_files)} 章")
     print(f"==================================================\n")
     
+    # ============ 定时发布设置 ============
+    # 默认每天 8:00 发布，每 3 章日期 +1 天
+    print("【定时发布设置】每章固定 08:00 发布，每发送 3 章日期自动 +1 天。")
+    start_date_input = input(
+        ">>> 请输入开始日期（格式 YYYY-MM-DD），直接回车则使用今天："
+    ).strip()
+    
+    timed_start_date = None
+    if start_date_input == "":
+        timed_start_date = datetime.now().date()
+        print(f"    -> 使用今天作为开始日期：{timed_start_date.isoformat()}")
+    else:
+        try:
+            timed_start_date = datetime.strptime(start_date_input, "%Y-%m-%d").date()
+            print(f"    -> 开始日期已设置为：{timed_start_date.isoformat()}")
+        except ValueError:
+            print("    [错误] 日期格式不正确，应为 YYYY-MM-DD，退出。")
+            return
+    
     # ============ 卷号选择（决定发布后文件归档到哪个卷目录） ============
     # 直接回车 = 不执行分卷切换（番茄平台会保持上次选择的分卷）
     # 输入具体卷号 = 在浏览器中主动切换到对应分卷
@@ -138,7 +343,7 @@ def main():
         
         success_count = 0
         
-        for file_path in txt_files:
+        for chapter_idx, file_path in enumerate(txt_files):
             filename = os.path.basename(file_path)
             raw_title = os.path.splitext(filename)[0]
             
@@ -724,6 +929,93 @@ def main():
                             editor_page.wait_for_timeout(500)
                         except Exception:
                             pass
+                        
+                        # ========== 定时发布 ==========
+                        # 计算：每 3 章日期 +1 天，默认时间 08:00
+                        target_date = timed_start_date + timedelta(days=chapter_idx // 3)
+                        target_date_str = target_date.strftime("%Y-%m-%d")
+                        target_time_str = "08:00"
+                        
+                        # 特殊规则（仅对今天生效）：若当前时间已晚于 08:00，
+                        # 把发布时间改成「当前时间向上取整到整点 + 1 小时」。
+                        # 例如现在 9:34 -> 改到 10:00；现在 10:05 -> 改到 11:00。
+                        today = datetime.now().date()
+                        now_dt = datetime.now()
+                        if target_date == today and (now_dt.hour > 8 or (now_dt.hour == 8 and now_dt.minute >= 0)):
+                            # 当前已过 8:00，使用 当前整点+1
+                            effective_hour = now_dt.hour + 1
+                            effective_date = target_date
+                            if effective_hour >= 24:
+                                # 极端情况（23:xx）：推到次日 8:00
+                                effective_hour = 8
+                                effective_date = target_date + timedelta(days=1)
+                                target_date = effective_date
+                                target_date_str = effective_date.strftime("%Y-%m-%d")
+                            target_time_str = f"{effective_hour:02d}:00"
+                            print(f"    - 当前时间 {now_dt.strftime('%H:%M')} 已过 08:00，本章改到 {target_date_str} {target_time_str}")
+                        else:
+                            print(f"    - 设置定时发布：{target_date_str} {target_time_str}（第 {chapter_idx + 1} 章）")
+                        
+                        try:
+                            # 1. 找到定时发布行（含"定时发布"文本），点击其右侧的 arco-switch 开关
+                            timed_switch_clicked = False
+                            timed_switches = editor_page.locator('button.arco-switch[role="switch"]').element_handles()
+                            # 找到与"定时发布"标签同行的 switch
+                            timed_lines = editor_page.locator('div.card-content-line').filter(has_text="定时发布").element_handles()
+                            for line in timed_lines:
+                                try:
+                                    switch_in_line = line.query_selector('button.arco-switch[role="switch"]')
+                                    if switch_in_line:
+                                        # 检查是否已开启
+                                        aria_checked = switch_in_line.evaluate("el => el.getAttribute('aria-checked')")
+                                        if aria_checked == "true":
+                                            timed_switch_clicked = True
+                                            print("    - 定时发布开关已是开启状态")
+                                        else:
+                                            switch_in_line.click()
+                                            print("    - 已开启【定时发布】开关")
+                                            timed_switch_clicked = True
+                                        break
+                                except Exception:
+                                    continue
+                            
+                            # 兜底：若上面没找到，遍历所有 arco-switch
+                            if not timed_switch_clicked:
+                                for sw in timed_switches:
+                                    try:
+                                        aria_checked = sw.evaluate("el => el.getAttribute('aria-checked')")
+                                        if aria_checked == "false":
+                                            sw.click()
+                                            print("    - 已开启定时发布开关（兜底匹配）")
+                                            timed_switch_clicked = True
+                                            break
+                                    except Exception:
+                                        continue
+                            
+                            editor_page.wait_for_timeout(1500)  # 等待日期/时间输入框展开动画
+                            
+                            if timed_switch_clicked:
+                                # 2. 通过弹出日历面板选择日期
+                                try:
+                                    arco_select_date(editor_page, target_date_str)
+                                except Exception as e:
+                                    print(f"    [警告] 日历选日期异常：{e}")
+                                
+                                # 3. 通过弹出时钟面板选择时间
+                                try:
+                                    arco_select_time(editor_page, target_time_str)
+                                except Exception as e:
+                                    print(f"    [警告] 时钟选时间异常：{e}")
+                                
+                                editor_page.wait_for_timeout(500)
+                                # 点击别处让 picker 失焦收起，避免遮挡
+                                try:
+                                    editor_page.locator('div.publish-confirm-card, div.card-content-line').first.click(force=True)
+                                except Exception:
+                                    pass
+                                editor_page.wait_for_timeout(500)
+                        except Exception as e:
+                            print(f"    [警告] 定时发布设置异常：{e}（将退化为直接发布）")
                         
                         publish_btn.click(force=True)
                         print(f"  [🎇 发布成功] 第 {success_count+1} 章：'第{chapter_num}章 {chapter_title}' 已被发往全世界！")
