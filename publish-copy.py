@@ -932,7 +932,7 @@ def main():
                         
                         # ========== 定时发布 ==========
                         # 计算：每 3 章日期 +1 天，默认时间 08:00
-                        target_date = timed_start_date + timedelta(days=chapter_idx // 3)
+                        target_date = timed_start_date + timedelta(days=chapter_idx // 2)
                         target_date_str = target_date.strftime("%Y-%m-%d")
                         target_time_str = "08:00"
                         
